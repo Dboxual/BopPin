@@ -1,0 +1,213 @@
+BopPin — Context Document for ChatGPT
+======================================
+
+This file describes the working state of the BopPin Minecraft plugin as of
+2026-06-30 (version 0.1.2). Use it as ground truth for any future work on
+this project.
+
+
+1. WHAT BOPPIN IS
+-----------------
+
+BopPin is a Paper plugin that adds pre-join PIN authentication for cracked
+(offline-mode) Minecraft servers. Instead of using chat commands after joining
+(like old AuthMe), BopPin uses Paper's Dialog API to show a GUI dialog BEFORE
+the player enters the game world, during Minecraft's configuration phase.
+
+Target server: Paper 26.1.2 (build 72), Minecraft's year-based versioning.
+Requires Java 25 (Paper 26.x dropped Java 21 support).
+Offline-mode server (online-mode=false in server.properties).
+
+
+2. HOW JAVA PRE-JOIN AUTH WORKS
+-------------------------------
+
+The core mechanism uses AsyncPlayerConnectionConfigureEvent, which fires during
+Paper's configuration/pre-join phase — after the TCP handshake and profile
+resolution, but BEFORE the player enters any world.
+
+Flow for a new player:
+  1. Player connects. Paper fires AsyncPlayerConnectionConfigureEvent.
+  2. PreJoinListener.onConfigure() runs on a Configuration Thread (async).
+  3. Plugin checks store.hasPin(uuid). Returns false for new players.
+  4. Plugin calls conn.getAudience().showDialog(registerDialog).
+  5. A CompletableFuture blocks the configuration thread, keeping the player
+     in the config phase (they see the dialog, not the game).
+  6. Player types a 4-8 digit numeric PIN + confirmation, clicks "Create PIN".
+  7. PlayerCustomClickEvent fires. DialogClickListener matches the
+     boppin:register/submit key, extracts DialogResponseView, completes the
+     future.
+  8. PreJoinListener validates the PIN, saves to SQLite, verifies the
+     round-trip, then DISCONNECTS the player with: "PIN created successfully.
+     Please rejoin and enter your PIN."
+  9. Registration success does NOT let the player into the game.
+
+Flow for a returning player:
+  1-3. Same, but hasPin() returns true.
+  4. Plugin shows the login dialog (single PIN field).
+  5-6. Player enters PIN, clicks "Log in".
+  7. Plugin verifies against the stored PBKDF2 hash.
+  8. On success: the future completes, the configuration thread returns
+     normally, and Paper lets the player join the game.
+  9. On failure: up to 5 attempts, then disconnect.
+
+
+3. HOW BEDROCK IS HANDLED
+-------------------------
+
+Bedrock players connect through Geyser + Floodgate. Floodgate assigns them a
+synthetic offline UUID (format: 00000000-0000-0000-0009-xxxxxxxxxxxx) and
+prefixes their name (e.g. ".DAVIDGUNZNY").
+
+The key insight: AsyncPlayerConnectionConfigureEvent fires for Floodgate/Bedrock
+connections too. The PaperPlayerConfigurationConnection exposes the Floodgate
+profile with the synthetic UUID. BopPin does NOT special-case Bedrock — the
+same dialog, same PIN storage, same flow applies. The Bedrock client receives
+the Paper dialog and can interact with it.
+
+Confirmed working in production logs:
+  - CONFIG EVENT FIRED for .DAVIDGUNZNY (uuid=00000000-0000-0000-0009-0000059e0f01)
+  - REGISTER DIALOG SHOWN, PIN SAVED, PIN VERIFIED, DISCONNECT-AFTER-REGISTER
+  - On rejoin: LOGIN DIALOG SHOWN, LOGIN SUCCESS
+
+
+4. IMPORTANT EVENTS AND CLASSES
+-------------------------------
+
+Paper API events used:
+  - AsyncPlayerConnectionConfigureEvent
+    Package: io.papermc.paper.event.connection.configuration
+    Fires on every player connection during the configuration phase.
+    getConnection() returns PlayerConfigurationConnection.
+
+  - PlayerCustomClickEvent
+    Package: io.papermc.paper.event.player
+    Fires when a player clicks a dialog button with DialogAction.customClick().
+    getIdentifier() returns the Key; getDialogResponseView() returns submitted
+    input values; getCommonConnection() returns the connection.
+
+  - PlayerConnectionCloseEvent
+    Package: com.destroystokyo.paper.event.player
+    Fires when the TCP connection drops (even pre-join). Used to clean up
+    pending futures so blocked configuration threads don't hang.
+
+Paper API classes used:
+  - PlayerConfigurationConnection (io.papermc.paper.connection)
+    The connection during config phase. getProfile() for UUID/name,
+    getAudience() for showDialog(), disconnect() inherited from PlayerConnection.
+
+  - Dialog, DialogBase, DialogBody, DialogInput, DialogType, ActionButton,
+    DialogAction, DialogResponseView
+    All under io.papermc.paper.dialog / io.papermc.paper.registry.data.dialog.
+    Dialog.create(builder -> ...) constructs dialogs programmatically.
+    DialogInput.text(key, label) creates text input fields.
+    DialogAction.customClick(Key, null) ties buttons to PlayerCustomClickEvent.
+    DialogResponseView.getText(key) reads submitted text values.
+
+BopPin classes:
+  - BopPinPlugin — JavaPlugin entry point. Opens SQLite, registers listeners.
+  - PreJoinListener — Handles AsyncPlayerConnectionConfigureEvent. Contains
+    the register and login loops, CompletableFuture blocking, fail-closed logic.
+  - DialogClickListener — Handles PlayerCustomClickEvent. Matches boppin:*
+    keys, completes the pending future.
+  - Dialogs — Static factory for register/login Dialog objects. Validation.
+  - PendingPrompt — Value object: Kind enum (REGISTER/LOGIN) + CompletableFuture.
+  - PinStore — SQLite via JDBC. Table: pins(uuid PK, last_name, pin_hash,
+    created_at, updated_at). WAL mode.
+  - PinHasher — PBKDF2WithHmacSHA256, 120k iterations, 16-byte salt, 256-bit
+    key, constant-time compare. Storage format: "iterations$salt_hex$hash_hex".
+
+
+5. WHAT DEBUGGING PROVED
+-------------------------
+
+v0.1.0: Plugin appeared to load but player entered the server with no dialog.
+  Cause: paper-plugin.yml was silently rejected. Switched to standard plugin.yml.
+
+v0.1.1: Same symptom. Logs revealed:
+  - BOPPIN NEW BUILD LOADED appeared (plugin partially loaded).
+  - UnsatisfiedLinkError on org.sqlite.core.NativeDB._open_utf8 crashed onEnable.
+  - Plugin was auto-disabled. No listeners were ever registered.
+  - Root cause: shadow-jar relocated org.sqlite to dev.dkocaj.boppin.libs.sqlite,
+    but the native .so library has hardcoded JNI symbols tied to org.sqlite.core.
+    Relocation broke the JNI bridge.
+  - Fix: Use Paper's libraries: mechanism in plugin.yml. Paper downloads
+    sqlite-jdbc at startup and classloads it without relocation. Jar shrank
+    from 14 MB to 21 KB.
+
+v0.1.2: Full flow works. Confirmed via server logs:
+  - Loading server plugin BopPin v0.1.2 ✓
+  - BOPPIN NEW BUILD LOADED ✓
+  - Listeners registered (handlers=1 each) ✓
+  - CONFIG EVENT FIRED on player connect ✓
+  - Register dialog shown, PIN saved, PIN verified, disconnect-after-register ✓
+  - Login dialog shown, LOGIN SUCCESS on rejoin ✓
+
+
+6. PAPER/DIALOG API CAVEATS
+----------------------------
+
+- Dialog API requires Paper 1.21.7+ (or 26.x). Not available on Spigot.
+
+- AsyncPlayerConnectionConfigureEvent runs on "Configuration Thread #N", not
+  the main server thread. All handler code must be thread-safe. BopPin uses
+  ConcurrentHashMap for pending prompts and synchronized methods in PinStore.
+
+- To keep the player in the configuration phase, you MUST block the event
+  handler thread (CompletableFuture.join()). If the handler returns, Paper
+  finishes configuration and lets the player into the world.
+
+- completeOnTimeout(null, 120, SECONDS) prevents permanent thread leaks if a
+  player's client hangs or disconnects without a close event.
+
+- Minecraft text inputs have no "password" or "masked" mode. PINs are visible
+  as typed. This is a Minecraft client limitation, not a Paper one.
+
+- sqlite-jdbc CANNOT be shadow-relocated. Its JNI native library has hardcoded
+  class names. Use Paper's libraries: plugin.yml mechanism instead.
+
+- plugin.yml with api-version: '1.21' works on Paper 26.x (backward compat).
+  paper-plugin.yml was more fragile for our use case.
+
+- The version property in plugin.yml requires inputs.property("version", ...)
+  in build.gradle.kts, otherwise Gradle's incremental processResources won't
+  re-expand ${version} on version bumps.
+
+
+7. KNOWN LIMITATIONS
+---------------------
+
+- No PIN reset (no admin command, no self-service).
+- No rate limiting between connection attempts (only within a single connection:
+  3 register attempts, 5 login attempts).
+- No config file. PIN length (4-8), attempt limits (3/5), dialog timeout (120s)
+  are compile-time constants in Dialogs.java and PreJoinListener.java.
+- Registration forces disconnect+rejoin (intentional Phase 1 design).
+- PIN input is not masked (Minecraft limitation).
+- No premium/online-mode bypass. All players go through PIN auth.
+- No multi-server sync (single SQLite file per server).
+
+
+8. BUILD AND TEST STATUS
+-------------------------
+
+Build system: Gradle 9.6.1 with Shadow plugin (com.gradleup.shadow 9.0.0-rc1).
+Java toolchain: JDK 25 (Eclipse Adoptium).
+Paper API: io.papermc.paper:paper-api:26.1.2.build.47-alpha (compileOnly).
+SQLite: org.xerial:sqlite-jdbc:3.50.3.0 (compileOnly; resolved by Paper at runtime).
+
+Build command:
+  JAVA_HOME=/path/to/jdk25 ./gradlew build
+
+Output: build/libs/BopPin-0.1.2.jar (21 KB).
+
+Test status: No automated tests. Manually verified on a live Paper 26.1.2
+server with a Bedrock player (.DAVIDGUNZNY) via Geyser+Floodgate. Full flow
+(register, disconnect, rejoin, login) confirmed working via server logs.
+
+Server environment:
+  - Paper 26.1.2 build 72 (1a6b910)
+  - Java 25.0.3 (OpenJDK 64-Bit Server VM)
+  - online-mode=false
+  - Geyser-Spigot 2.10.1-SNAPSHOT + Floodgate 2.2.5-SNAPSHOT
+  - Managed via Crafty Controller (Docker)

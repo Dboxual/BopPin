@@ -1,0 +1,9 @@
+name: BopPin
+version: '${version}'
+main: dev.dkocaj.boppin.BopPinPlugin
+api-version: '1.21'
+load: STARTUP
+authors: [dkocaj]
+description: Pre-join PIN authentication for offline-mode Paper servers.
+libraries:
+  - org.xerial:sqlite-jdbc:3.50.3.0
