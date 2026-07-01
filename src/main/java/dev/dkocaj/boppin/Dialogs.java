@@ -15,7 +15,9 @@ import net.kyori.adventure.text.format.NamedTextColor;
 
 final class Dialogs {
     static final Key REGISTER_SUBMIT = Key.key("boppin", "register/submit");
+    static final Key REGISTER_CANCEL = Key.key("boppin", "register/cancel");
     static final Key LOGIN_SUBMIT = Key.key("boppin", "login/submit");
+    static final Key LOGIN_CANCEL = Key.key("boppin", "login/cancel");
 
     static final String INPUT_PIN = "pin";
     static final String INPUT_CONFIRM = "confirm";
@@ -69,7 +71,7 @@ final class Dialogs {
                                 Component.text("Cancel", NamedTextColor.RED),
                                 Component.text("Disconnect from the server."),
                                 100,
-                                null
+                                DialogAction.customClick(REGISTER_CANCEL, null)
                         )
                 ))
         );
@@ -113,7 +115,7 @@ final class Dialogs {
                                 Component.text("Cancel", NamedTextColor.RED),
                                 Component.text("Disconnect from the server."),
                                 100,
-                                null
+                                DialogAction.customClick(LOGIN_CANCEL, null)
                         )
                 ))
         );

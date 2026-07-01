@@ -5,6 +5,7 @@ import io.papermc.paper.event.player.PlayerCustomClickEvent;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.logging.Logger;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -24,6 +25,10 @@ public final class BopPinPlugin extends JavaPlugin {
                 + "  (Minecraft " + Bukkit.getMinecraftVersion() + ")");
         banner(log, "Java runtime: " + System.getProperty("java.version")
                 + "  (" + System.getProperty("java.vm.name") + ")");
+
+        saveDefaultConfig();
+        List<String> bedrockPrefixes = getConfig().getStringList("bedrock-prefixes");
+        banner(log, "Bedrock prefixes: " + bedrockPrefixes);
 
         Path dataDir = getDataFolder().toPath();
         banner(log, "Plugin data folder: " + dataDir.toAbsolutePath());
@@ -45,7 +50,7 @@ public final class BopPinPlugin extends JavaPlugin {
         }
         banner(log, "PIN database ready at " + dbFile.toAbsolutePath());
 
-        PreJoinListener preJoin = new PreJoinListener(store, log);
+        PreJoinListener preJoin = new PreJoinListener(store, log, this, bedrockPrefixes);
         DialogClickListener clicks = new DialogClickListener(preJoin, log);
         getServer().getPluginManager().registerEvents(preJoin, this);
         getServer().getPluginManager().registerEvents(clicks, this);

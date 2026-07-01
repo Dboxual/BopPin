@@ -1,11 +1,11 @@
 package dev.dkocaj.boppin;
 
 import io.papermc.paper.connection.PlayerConfigurationConnection;
-import io.papermc.paper.dialog.DialogResponseView;
 import io.papermc.paper.event.player.PlayerCustomClickEvent;
 import java.util.Map;
 import java.util.UUID;
 import java.util.logging.Logger;
+import net.kyori.adventure.key.Key;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 
@@ -20,9 +20,11 @@ public final class DialogClickListener implements Listener {
 
     @EventHandler
     public void onClick(PlayerCustomClickEvent event) {
-        boolean isRegister = Dialogs.REGISTER_SUBMIT.equals(event.getIdentifier());
-        boolean isLogin = Dialogs.LOGIN_SUBMIT.equals(event.getIdentifier());
-        if (!isRegister && !isLogin) return;
+        Key id = event.getIdentifier();
+
+        boolean isSubmit = Dialogs.REGISTER_SUBMIT.equals(id) || Dialogs.LOGIN_SUBMIT.equals(id);
+        boolean isCancel = Dialogs.REGISTER_CANCEL.equals(id) || Dialogs.LOGIN_CANCEL.equals(id);
+        if (!isSubmit && !isCancel) return;
 
         if (!(event.getCommonConnection() instanceof PlayerConfigurationConnection conn)) {
             return;
@@ -31,7 +33,6 @@ public final class DialogClickListener implements Listener {
         UUID uuid = conn.getProfile().getId();
         if (uuid == null) return;
 
-        DialogResponseView view = event.getDialogResponseView();
         Map<UUID, PendingPrompt> pending = preJoin.pending();
         PendingPrompt waiting = pending.get(uuid);
         if (waiting == null) {
@@ -39,14 +40,27 @@ public final class DialogClickListener implements Listener {
             return;
         }
 
-        PendingPrompt.Kind expected = isRegister ? PendingPrompt.Kind.REGISTER
-                                                 : PendingPrompt.Kind.LOGIN;
+        if (waiting.conn != conn) {
+            log.warning("[BopPin] click event from different connection for " + uuid);
+            return;
+        }
+
+        if (isCancel) {
+            String kind = Dialogs.REGISTER_CANCEL.equals(id) ? "REGISTER" : "LOGIN";
+            log.info("[BopPin] DIALOG CANCELLED kind=" + kind + " uuid=" + uuid);
+            waiting.future.complete(null);
+            return;
+        }
+
+        boolean expectRegister = Dialogs.REGISTER_SUBMIT.equals(id);
+        PendingPrompt.Kind expected = expectRegister ? PendingPrompt.Kind.REGISTER
+                                                     : PendingPrompt.Kind.LOGIN;
         if (waiting.kind != expected) {
             log.warning("[BopPin] click event kind mismatch for " + uuid
                     + " expected=" + waiting.kind + " got=" + expected);
             return;
         }
 
-        waiting.future.complete(view);
+        waiting.future.complete(event.getDialogResponseView());
     }
 }
